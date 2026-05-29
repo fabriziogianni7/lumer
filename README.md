@@ -1,6 +1,6 @@
-# Loom Agent
+# Loomer
 
-**Loom Agent** is a desktop app (Electron + React) for quick screen recordings with a face camera overlay—similar in spirit to Loom, but local-first. You capture a **display or window**, review and **trim** the clip, optionally **cut silence**, generate **subtitles** (local Whisper or OpenAI), and export **QuickTime-friendly MP4** files with optional burned-in captions.
+**Loomer** is a desktop app (Electron + React) for quick screen recordings with a face camera overlay—similar in spirit to Loom, but local-first. You capture a **display or window**, review and **trim** the clip, optionally **cut silence**, generate **subtitles** (local Whisper or OpenAI), and export **QuickTime-friendly MP4** files with optional burned-in captions.
 
 Built for **macOS** (screen capture, loopback audio, and permissions are tuned for darwin).
 
