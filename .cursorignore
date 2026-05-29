@@ -1,0 +1,55 @@
+# Reduce indexer noise and keep secrets out of AI context
+
+# Dependencies & bundled binaries (very large)
+node_modules/
+**/node_modules/**
+
+# Build artifacts
+out/
+dist/
+dist-electron/
+release/
+*.tsbuildinfo
+
+# Secrets — never index
+.env
+.env.*
+!.env.example
+
+# VCS
+.git/
+
+# Caches & tool output
+.cache/
+.vite/
+.turbo/
+coverage/
+.nyc_output/
+*.log
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Electron download / ffmpeg-static binaries inside node_modules
+**/electron/dist/
+**/ffmpeg-static/**
+
+# Local media if copied into the repo
+*.mp4
+*.mov
+*.webm
+*.mkv
+*.m4v
+*.wav
+*.mp3
+
+# Python virtualenvs if present in repo root
+venv/
+.venv/
+__pycache__/
+
+# Packaging outputs
+*.dmg
+*.app
+*.blockmap
