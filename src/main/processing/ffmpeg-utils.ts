@@ -1,6 +1,15 @@
 import { spawn } from 'child_process'
-import { rename, unlink } from 'fs/promises'
+import { rename } from 'fs/promises'
 import ffmpegPath from 'ffmpeg-static'
+import {
+  AAC_BITRATE,
+  SCALE_VF,
+  VTB_BITRATE,
+  VTB_BUFSIZE,
+  VTB_MAXRATE,
+  X264_CRF,
+  X264_PRESET
+} from './encode-quality'
 
 export function getFfmpeg(): string {
   if (!ffmpegPath) throw new Error('ffmpeg-static binary not found')
@@ -68,167 +77,107 @@ export async function probeDuration(inputPath: string): Promise<number> {
   )
 }
 
+const audioProbeCache = new Map<string, boolean>()
+
 export async function inputHasAudio(inputPath: string): Promise<boolean> {
+  const cached = audioProbeCache.get(inputPath)
+  if (cached !== undefined) return cached
   const stderr = await ffprobeStderr(inputPath)
-  return /\n  Stream #\d+:\d+.*Audio:/.test(stderr)
+  const has = /\n  Stream #\d+:\d+.*Audio:/.test(stderr)
+  audioProbeCache.set(inputPath, has)
+  return has
 }
 
-/** H.264 + AAC MP4 tuned for QuickTime / macOS Preview. */
-const QT_VIDEO = [
-  '-c:v',
-  'libx264',
-  '-profile:v',
-  'main',
-  '-level',
-  '4.0',
-  '-pix_fmt',
-  'yuv420p',
-  '-preset',
-  'fast',
-  '-crf',
-  '20',
-  '-r',
-  '30',
-  '-fps_mode',
-  'cfr',
-  '-tag:v',
-  'avc1'
-]
+export function clearMediaProbeCache(): void {
+  audioProbeCache.clear()
+}
 
-const QT_SCALE_VF = 'scale=trunc(iw/2)*2:trunc(ih/2)*2'
+let macVideoToolbox: boolean | null = null
 
-const QT_AUDIO = ['-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2']
+async function useMacVideoToolbox(): Promise<boolean> {
+  if (process.platform !== 'darwin') return false
+  if (macVideoToolbox !== null) return macVideoToolbox
+  try {
+    await runFfmpeg([
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-f',
+      'lavfi',
+      '-i',
+      'color=c=black:s=64x64:d=0.04',
+      '-pix_fmt',
+      'yuv420p',
+      '-c:v',
+      'h264_videotoolbox',
+      '-f',
+      'null',
+      '-'
+    ])
+    macVideoToolbox = true
+  } catch {
+    macVideoToolbox = false
+  }
+  return macVideoToolbox
+}
 
-const QT_MUX = ['-movflags', '+faststart', '-f', 'mp4']
+export async function getVideoEncoderLabel(): Promise<string> {
+  return (await useMacVideoToolbox()) ? 'Apple VideoToolbox (hardware)' : 'libx264 (software)'
+}
 
-function buildQuickTimeArgs(hasAudio: boolean, outputPath: string): string[] {
-  if (hasAudio) {
+/** Keep source frame timing — forcing 30fps CFR often desyncs mic/canvas WebM exports. */
+async function videoEncodeArgs(): Promise<string[]> {
+  if (await useMacVideoToolbox()) {
     return [
-      '-map',
-      '0:v:0',
-      '-map',
-      '0:a:0?',
-      '-vf',
-      QT_SCALE_VF,
-      ...QT_VIDEO,
-      ...QT_AUDIO,
-      ...QT_MUX,
-      outputPath
+      '-c:v',
+      'h264_videotoolbox',
+      '-b:v',
+      VTB_BITRATE,
+      '-maxrate',
+      VTB_MAXRATE,
+      '-bufsize',
+      VTB_BUFSIZE,
+      '-profile:v',
+      'high',
+      '-pix_fmt',
+      'yuv420p',
+      '-tag:v',
+      'avc1',
+      '-fps_mode',
+      'passthrough'
     ]
   }
   return [
-    '-map',
-    '0:v:0',
-    '-map',
-    '1:a:0',
-    '-shortest',
-    '-vf',
-    QT_SCALE_VF,
-    ...QT_VIDEO,
-    ...QT_AUDIO,
-    ...QT_MUX,
-    outputPath
+    '-c:v',
+    'libx264',
+    '-profile:v',
+    'high',
+    '-level',
+    '4.2',
+    '-pix_fmt',
+    'yuv420p',
+    '-preset',
+    X264_PRESET,
+    '-crf',
+    String(X264_CRF),
+    '-tune',
+    'animation',
+    '-fps_mode',
+    'passthrough',
+    '-tag:v',
+    'avc1'
   ]
 }
 
-export async function encodeQuickTimeMp4(inputPath: string, outputPath: string): Promise<void> {
-  const hasAudio = await inputHasAudio(inputPath)
-  const tmpOut = `${outputPath}.part`
-  const base = ['-y', '-hide_banner', '-loglevel', 'error', '-i', inputPath]
-  if (hasAudio) {
-    await runFfmpeg([...base, ...buildQuickTimeArgs(true, tmpOut)])
-  } else {
-    await runFfmpeg([
-      ...base,
-      '-f',
-      'lavfi',
-      '-i',
-      'anullsrc=channel_layout=stereo:sample_rate=48000',
-      ...buildQuickTimeArgs(false, tmpOut)
-    ])
-  }
-  await rename(tmpOut, outputPath)
-}
+const QT_SCALE_VF = SCALE_VF
 
-export async function transcodeWebmToMp4(webmPath: string, mp4Path: string): Promise<void> {
-  await encodeQuickTimeMp4(webmPath, mp4Path)
-}
+const QT_AUDIO = ['-c:a', 'aac', '-b:a', AAC_BITRATE, '-ar', '48000', '-ac', '2']
 
-/** Trim and re-encode (stream copy breaks QuickTime for MP4). */
-export async function trimToQuickTimeMp4(
-  inputPath: string,
-  startSec: number,
-  endSec: number,
-  outputPath: string
-): Promise<void> {
-  const hasAudio = await inputHasAudio(inputPath)
-  const tmpOut = `${outputPath}.part`
-  const input = [
-    '-y',
-    '-hide_banner',
-    '-loglevel',
-    'error',
-    '-ss',
-    startSec.toFixed(3),
-    '-to',
-    endSec.toFixed(3),
-    '-i',
-    inputPath
-  ]
-  if (hasAudio) {
-    await runFfmpeg([...input, ...buildQuickTimeArgs(true, tmpOut)])
-  } else {
-    await runFfmpeg([
-      ...input,
-      '-f',
-      'lavfi',
-      '-i',
-      'anullsrc=channel_layout=stereo:sample_rate=48000',
-      ...buildQuickTimeArgs(false, tmpOut)
-    ])
-  }
-  await rename(tmpOut, outputPath)
-}
+const QT_MUX = ['-movflags', '+faststart', '-f', 'mp4']
 
-export async function concatToQuickTimeMp4(listPath: string, outputPath: string): Promise<void> {
-  const tmpOut = `${outputPath}.part`
-  await runFfmpeg([
-    '-y',
-    '-hide_banner',
-    '-loglevel',
-    'error',
-    '-f',
-    'concat',
-    '-safe',
-    '0',
-    '-i',
-    listPath,
-    '-map',
-    '0:v:0',
-    '-map',
-    '0:a:0?',
-    '-vf',
-    QT_SCALE_VF,
-    ...QT_VIDEO,
-    ...QT_AUDIO,
-    ...QT_MUX,
-    tmpOut
-  ])
-  await rename(tmpOut, outputPath)
-}
+const AUDIO_SYNC = 'aresample=48000:async=1:first_pts=0'
 
-export function escapeSubtitlesPath(filePath: string): string {
-  return filePath.replace(/\\/g, '\\\\').replace(/:/g, '\\:').replace(/'/g, "\\'")
-}
-
-export async function replaceWithQuickTimeMp4(inputPath: string): Promise<void> {
-  const tmp = `${inputPath}.qt-fix.mp4`
-  await encodeQuickTimeMp4(inputPath, tmp)
-  await unlink(inputPath).catch(() => undefined)
-  await rename(tmp, inputPath)
-}
-
-function buildAtempoFilter(speed: number): string {
+function buildAtempoChain(speed: number): string {
   const filters: string[] = []
   let s = speed
   while (s > 2.0001) {
@@ -243,52 +192,199 @@ function buildAtempoFilter(speed: number): string {
   return filters.join(',')
 }
 
-/** speed &gt; 1 = faster, &lt; 1 = slower */
-export async function applyVideoSpeed(
+function buildAvFilterComplex(
+  startSec: number | undefined,
+  endSec: number | undefined,
+  speed: number
+): { filter: string; maps: string[] } {
+  const hasTrim = startSec != null && endSec != null
+  const hasSpeed = Math.abs(speed - 1) >= 0.02
+  const start = hasTrim ? startSec.toFixed(3) : '0'
+  const end = hasTrim ? endSec!.toFixed(3) : undefined
+
+  const vChain: string[] = []
+  if (hasTrim) vChain.push(`trim=start=${start}:end=${end}`)
+  vChain.push('setpts=PTS-STARTPTS')
+  if (hasSpeed) vChain.push(`setpts=PTS/${speed}`)
+  vChain.push(QT_SCALE_VF)
+  const v = `[0:v]${vChain.join(',')}[v]`
+
+  const aChain: string[] = []
+  if (hasTrim) aChain.push(`atrim=start=${start}:end=${end}`, 'asetpts=PTS-STARTPTS')
+  else aChain.push('asetpts=PTS-STARTPTS')
+  if (hasSpeed) aChain.push(buildAtempoChain(speed))
+  aChain.push(AUDIO_SYNC)
+  const a = `[0:a]${aChain.join(',')}[a]`
+
+  return { filter: `${v};${a}`, maps: ['-map', '[v]', '-map', '[a]'] }
+}
+
+type SegmentEncodeOptions = {
+  startSec?: number
+  endSec?: number
+  speed?: number
+}
+
+async function encodeSegmentToQuickTimeMp4(
   inputPath: string,
   outputPath: string,
-  speed: number
+  segment: SegmentEncodeOptions = {}
 ): Promise<void> {
-  if (Math.abs(speed - 1) < 0.02) {
-    await encodeQuickTimeMp4(inputPath, outputPath)
-    return
-  }
+  const speed = segment.speed ?? 1
   const hasAudio = await inputHasAudio(inputPath)
   const tmpOut = `${outputPath}.part`
-  const videoFilter = `setpts=PTS/${speed},scale=trunc(iw/2)*2:trunc(ih/2)*2`
-  const base = ['-y', '-hide_banner', '-loglevel', 'error', '-i', inputPath]
+  const video = await videoEncodeArgs()
+  const hasTrim = segment.startSec != null && segment.endSec != null
+  const hasSpeed = Math.abs(speed - 1) >= 0.02
+  const useFilterSync = hasAudio && (hasTrim || hasSpeed)
 
-  if (hasAudio) {
+  const baseIn = ['-y', '-hide_banner', '-loglevel', 'error', '-fflags', '+genpts', '-i', inputPath]
+
+  if (useFilterSync) {
+    const { filter, maps } = buildAvFilterComplex(segment.startSec, segment.endSec, speed)
+    await runFfmpeg([...baseIn, '-filter_complex', filter, ...maps, ...video, ...QT_AUDIO, ...QT_MUX, tmpOut])
+  } else if (hasAudio) {
     await runFfmpeg([
-      ...base,
+      ...baseIn,
+      '-map',
+      '0:v:0',
+      '-map',
+      '0:a:0?',
       '-vf',
-      videoFilter,
+      QT_SCALE_VF,
       '-af',
-      buildAtempoFilter(speed),
-      ...QT_VIDEO,
+      AUDIO_SYNC,
+      ...video,
       ...QT_AUDIO,
       ...QT_MUX,
       tmpOut
     ])
   } else {
     await runFfmpeg([
-      ...base,
+      ...baseIn,
       '-f',
       'lavfi',
       '-i',
       'anullsrc=channel_layout=stereo:sample_rate=48000',
-      '-vf',
-      videoFilter,
       '-map',
       '0:v:0',
       '-map',
       '1:a:0',
       '-shortest',
-      ...QT_VIDEO,
+      '-vf',
+      QT_SCALE_VF,
+      ...video,
       ...QT_AUDIO,
       ...QT_MUX,
       tmpOut
     ])
   }
   await rename(tmpOut, outputPath)
+}
+
+export async function encodeQuickTimeMp4(inputPath: string, outputPath: string): Promise<void> {
+  await encodeSegmentToQuickTimeMp4(inputPath, outputPath)
+}
+
+export async function transcodeWebmToMp4(webmPath: string, mp4Path: string): Promise<void> {
+  await encodeQuickTimeMp4(webmPath, mp4Path)
+}
+
+export async function trimToQuickTimeMp4(
+  inputPath: string,
+  startSec: number,
+  endSec: number,
+  outputPath: string
+): Promise<void> {
+  await encodeSegmentToQuickTimeMp4(inputPath, outputPath, { startSec, endSec })
+}
+
+export async function trimAndSpeedToQuickTimeMp4(
+  inputPath: string,
+  startSec: number,
+  endSec: number,
+  outputPath: string,
+  speed: number
+): Promise<void> {
+  await encodeSegmentToQuickTimeMp4(inputPath, outputPath, { startSec, endSec, speed })
+}
+
+export async function concatToQuickTimeMp4(listPath: string, outputPath: string): Promise<void> {
+  const tmpOut = `${outputPath}.part`
+  try {
+    await runFfmpeg([
+      '-y',
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-f',
+      'concat',
+      '-safe',
+      '0',
+      '-i',
+      listPath,
+      '-c',
+      'copy',
+      '-movflags',
+      '+faststart',
+      tmpOut
+    ])
+    await rename(tmpOut, outputPath)
+    return
+  } catch {
+    /* re-encode if stream copy concat fails */
+  }
+
+  const video = await videoEncodeArgs()
+  await runFfmpeg([
+    '-y',
+    '-hide_banner',
+    '-loglevel',
+    'error',
+    '-fflags',
+    '+genpts',
+    '-f',
+    'concat',
+    '-safe',
+    '0',
+    '-i',
+    listPath,
+    '-map',
+    '0:v:0',
+    '-map',
+    '0:a:0?',
+    '-vf',
+    QT_SCALE_VF,
+    '-af',
+    AUDIO_SYNC,
+    ...video,
+    ...QT_AUDIO,
+    ...QT_MUX,
+    tmpOut
+  ])
+  await rename(tmpOut, outputPath)
+}
+
+export function escapeSubtitlesPath(filePath: string): string {
+  return filePath.replace(/\\/g, '\\\\').replace(/:/g, '\\:').replace(/'/g, "\\'")
+}
+
+export async function replaceWithQuickTimeMp4(inputPath: string): Promise<void> {
+  const tmp = `${inputPath}.qt-fix.mp4`
+  await encodeQuickTimeMp4(inputPath, tmp)
+  const { unlink } = await import('fs/promises')
+  await unlink(inputPath).catch(() => undefined)
+  await rename(tmp, inputPath)
+}
+
+export async function applyVideoSpeed(
+  inputPath: string,
+  outputPath: string,
+  speed: number
+): Promise<void> {
+  await encodeSegmentToQuickTimeMp4(inputPath, outputPath, { speed })
+}
+
+export async function getBurnInVideoArgs(): Promise<string[]> {
+  return videoEncodeArgs()
 }

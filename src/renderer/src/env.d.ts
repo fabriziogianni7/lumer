@@ -39,6 +39,9 @@ declare global {
         buffer: ArrayBuffer,
         suggestedName: string
       ) => Promise<{ canceled: true } | { canceled: false; filePath: string }>
+      pickVideoFile: () => Promise<
+        { canceled: true } | { canceled: false; filePath: string }
+      >
       getMediaDuration: (filePath: string) => Promise<number>
       toMediaUrl: (filePath: string) => Promise<string>
       getMediaPreview: (filePath: string) => Promise<

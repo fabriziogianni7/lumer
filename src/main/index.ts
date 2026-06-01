@@ -116,6 +116,18 @@ ipcMain.handle('save-recording', async (_event, buffer: ArrayBuffer, suggestedNa
   return { canceled: false as const, filePath: mp4Path }
 })
 
+ipcMain.handle('pick-video-file', async () => {
+  const recordingsDir = join(app.getPath('videos'), 'Loom Agent')
+  const { canceled, filePaths } = await dialog.showOpenDialog({
+    title: 'Open video to process',
+    defaultPath: existsSync(recordingsDir) ? recordingsDir : app.getPath('videos'),
+    properties: ['openFile'],
+    filters: [{ name: 'Video', extensions: ['mp4', 'mov', 'm4v', 'webm'] }]
+  })
+  if (canceled || !filePaths[0]) return { canceled: true as const }
+  return { canceled: false as const, filePath: filePaths[0] }
+})
+
 ipcMain.handle('get-media-duration', async (_event, filePath: string) => {
   return probeDuration(filePath)
 })

@@ -37,6 +37,10 @@ contextBridge.exposeInMainWorld('loomAgent', {
   getCaptureSources: (): Promise<CaptureSource[]> => ipcRenderer.invoke('get-capture-sources'),
   saveRecording: (buffer: ArrayBuffer, suggestedName: string) =>
     ipcRenderer.invoke('save-recording', buffer, suggestedName),
+  pickVideoFile: () =>
+    ipcRenderer.invoke('pick-video-file') as Promise<
+      { canceled: true } | { canceled: false; filePath: string }
+    >,
   getMediaDuration: (filePath: string) => ipcRenderer.invoke('get-media-duration', filePath),
   toMediaUrl: (filePath: string) => ipcRenderer.invoke('to-media-url', filePath),
   getMediaPreview: (filePath: string) =>

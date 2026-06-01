@@ -17,6 +17,9 @@ import {
   clampCamPosition,
   defaultCamPosition
 } from '../constants/canvas'
+import { RECORDER_VIDEO_BITS_PER_SECOND } from '../constants/encode-quality'
+
+const CAPTURE_FPS = 30
 
 function drawRoundedRect(
   ctx: CanvasRenderingContext2D,
@@ -54,6 +57,7 @@ export function useCompositor(
   const recorderRef = useRef<MediaRecorder | null>(null)
   const chunksRef = useRef<Blob[]>([])
   const rafRef = useRef<number>(0)
+  const recordIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const screenStreamRef = useRef<MediaStream | null>(null)
   const camStreamRef = useRef<MediaStream | null>(null)
   const micStreamRef = useRef<MediaStream | null>(null)
@@ -75,6 +79,10 @@ export function useCompositor(
 
   const stopStreams = useCallback(() => {
     cancelAnimationFrame(rafRef.current)
+    if (recordIntervalRef.current) {
+      clearInterval(recordIntervalRef.current)
+      recordIntervalRef.current = null
+    }
     screenStreamRef.current?.getTracks().forEach((t) => t.stop())
     camStreamRef.current?.getTracks().forEach((t) => t.stop())
     micStreamRef.current?.getTracks().forEach((t) => t.stop())
@@ -134,9 +142,12 @@ export function useCompositor(
       drawRoundedRect(ctx, x, y, CAM_SIZE, CAM_SIZE, CAM_RADIUS)
       ctx.stroke()
     }
-
-    rafRef.current = requestAnimationFrame(drawFrame)
   }, [])
+
+  const tickPreview = useCallback(() => {
+    drawFrame()
+    rafRef.current = requestAnimationFrame(tickPreview)
+  }, [drawFrame])
 
   const startPreview = useCallback(async (): Promise<StartPreviewResult> => {
     setError(null)
@@ -199,15 +210,13 @@ export function useCompositor(
       canvasRef.current = canvas
 
       cancelAnimationFrame(rafRef.current)
-      rafRef.current = requestAnimationFrame(drawFrame)
+      rafRef.current = requestAnimationFrame(tickPreview)
 
-      const canvasStream = canvas.captureStream(30)
+      const canvasStream = canvas.captureStream(CAPTURE_FPS)
       const audioTracks: MediaStreamTrack[] = []
       screenStream.getAudioTracks().forEach((t) => audioTracks.push(t))
       micStream?.getAudioTracks().forEach((t) => audioTracks.push(t))
-      if (audioTracks.length === 1) {
-        canvasStream.addTrack(audioTracks[0])
-      } else if (audioTracks.length > 1) {
+      if (audioTracks.length > 0) {
         const ctx = new AudioContext()
         audioContextRef.current = ctx
         const dest = ctx.createMediaStreamDestination()
@@ -225,15 +234,23 @@ export function useCompositor(
       stopStreams()
       return { ok: false }
     }
-  }, [selectedSource, includeMic, includeSystemAudio, drawFrame, stopStreams, refreshSources])
+  }, [selectedSource, includeMic, includeSystemAudio, tickPreview, stopStreams, refreshSources])
 
   const startRecording = useCallback(() => {
     if (!previewStream) return null
     chunksRef.current = []
+    cancelAnimationFrame(rafRef.current)
+    recordIntervalRef.current = setInterval(() => drawFrame(), 1000 / CAPTURE_FPS)
     const mime = MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus')
       ? 'video/webm;codecs=vp9,opus'
-      : 'video/webm'
-    const recorder = new MediaRecorder(previewStream, { mimeType: mime, videoBitsPerSecond: 6_000_000 })
+      : MediaRecorder.isTypeSupported('video/webm;codecs=vp8,opus')
+        ? 'video/webm;codecs=vp8,opus'
+        : 'video/webm'
+    const recorder = new MediaRecorder(previewStream, {
+      mimeType: mime,
+      videoBitsPerSecond: RECORDER_VIDEO_BITS_PER_SECOND,
+      audioBitsPerSecond: 256_000
+    })
     recorder.ondataavailable = (ev) => {
       if (ev.data.size) chunksRef.current.push(ev.data)
     }
@@ -241,7 +258,7 @@ export function useCompositor(
     recorderRef.current = recorder
     setIsRecording(true)
     return recorder
-  }, [previewStream])
+  }, [previewStream, drawFrame])
 
   const stopRecording = useCallback((): Promise<Blob> => {
     return new Promise((resolve, reject) => {
@@ -251,12 +268,17 @@ export function useCompositor(
         return
       }
       recorder.onstop = () => {
+        if (recordIntervalRef.current) {
+          clearInterval(recordIntervalRef.current)
+          recordIntervalRef.current = null
+        }
+        rafRef.current = requestAnimationFrame(tickPreview)
         setIsRecording(false)
         resolve(new Blob(chunksRef.current, { type: recorder.mimeType }))
       }
       recorder.stop()
     })
-  }, [])
+  }, [tickPreview])
 
   useEffect(() => () => stopStreams(), [stopStreams])
 

@@ -1,8 +1,9 @@
 import { join, basename, extname } from 'path'
 import { readFile, writeFile, rename } from 'fs/promises'
 import { existsSync } from 'fs'
-import { runFfmpeg, runCommand } from './ffmpeg-utils'
+import { runFfmpeg, runCommand, getBurnInVideoArgs } from './ffmpeg-utils'
 import { findWhisperRunner, getWhisperInstallHint } from './whisper-resolve'
+import { SCALE_VF } from './encode-quality'
 
 function formatSrtTime(seconds: number): string {
   const h = Math.floor(seconds / 3600)
@@ -118,8 +119,9 @@ export async function burnSubtitles(
   outputVideo: string
 ): Promise<void> {
   const escaped = srtPath.replace(/\\/g, '/').replace(/:/g, '\\:').replace(/'/g, "'\\''")
-  const vf = `subtitles='${escaped}':force_style='FontName=Helvetica,FontSize=22,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=1,MarginV=40',scale=trunc(iw/2)*2:trunc(ih/2)*2`
+  const vf = `subtitles='${escaped}':force_style='FontName=Helvetica,FontSize=22,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=1,MarginV=40',${SCALE_VF}`
   const tmpOut = `${outputVideo}.part`
+  const video = await getBurnInVideoArgs()
   await runFfmpeg([
     '-y',
     '-hide_banner',
@@ -133,28 +135,13 @@ export async function burnSubtitles(
     '0:a:0?',
     '-vf',
     vf,
-    '-c:v',
-    'libx264',
-    '-profile:v',
-    'main',
-    '-level',
-    '4.0',
-    '-pix_fmt',
-    'yuv420p',
-    '-preset',
-    'fast',
-    '-crf',
-    '20',
-    '-r',
-    '30',
-    '-fps_mode',
-    'cfr',
-    '-tag:v',
-    'avc1',
+    ...video,
+    '-af',
+    'aresample=48000:async=1:first_pts=0',
     '-c:a',
     'aac',
     '-b:a',
-    '192k',
+    '256k',
     '-ar',
     '48000',
     '-ac',

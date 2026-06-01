@@ -8,6 +8,7 @@ type Props = {
   onProcess: (options: ProcessOptions) => void
   onBack: () => void
   processError?: string | null
+  imported?: boolean
 }
 
 const defaultProcess = (): Omit<ProcessOptions, 'trimStartSec' | 'trimEndSec'> => ({
@@ -16,7 +17,7 @@ const defaultProcess = (): Omit<ProcessOptions, 'trimStartSec' | 'trimEndSec'> =
   minSilenceSec: 0.6,
   paddingSec: 0.12,
   transcription: 'local',
-  whisperModel: 'base',
+  whisperModel: 'tiny',
   openaiApiKey: loadOpenAiKey(),
   burnInSubtitles: false,
   videoSpeed: 1,
@@ -31,7 +32,7 @@ const SPEED_PRESETS = [
   { label: '2×', value: 2 }
 ]
 
-export function ReviewPanel({ filePath, onProcess, onBack, processError }: Props) {
+export function ReviewPanel({ filePath, onProcess, onBack, processError, imported }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const [duration, setDuration] = useState(0)
   const [trimStart, setTrimStart] = useState(0)
@@ -106,6 +107,9 @@ export function ReviewPanel({ filePath, onProcess, onBack, processError }: Props
       <div className="review-header">
         <h3>Review, cut &amp; trim</h3>
         <p className="muted">{previewLabel}</p>
+        {imported && (
+          <p className="muted">Opened from disk — outputs are saved next to this file.</p>
+        )}
       </div>
 
       <div className="review-video-wrap">
@@ -264,7 +268,7 @@ export function ReviewPanel({ filePath, onProcess, onBack, processError }: Props
               value={processOpts.whisperModel}
               onChange={(e) => setProcessOpts((p) => ({ ...p, whisperModel: e.target.value }))}
             >
-              <option value="tiny">tiny</option>
+              <option value="tiny">tiny (fastest)</option>
               <option value="base">base</option>
               <option value="small">small</option>
               <option value="medium">medium</option>
@@ -303,7 +307,7 @@ export function ReviewPanel({ filePath, onProcess, onBack, processError }: Props
 
       <div className="record-bar">
         <button type="button" className="btn ghost" onClick={onBack}>
-          Back
+          {imported ? 'Choose another file' : 'Back'}
         </button>
         <button
           type="button"

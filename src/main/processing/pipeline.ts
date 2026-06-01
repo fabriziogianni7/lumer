@@ -1,13 +1,16 @@
 import { join, dirname, basename, extname } from 'path'
-import { mkdir, writeFile, readFile, copyFile, rename } from 'fs/promises'
+import { mkdir, writeFile, readFile, copyFile } from 'fs/promises'
 import { existsSync } from 'fs'
 import {
   probeDuration,
   runFfmpeg,
   trimToQuickTimeMp4,
+  trimAndSpeedToQuickTimeMp4,
   concatToQuickTimeMp4,
   encodeQuickTimeMp4,
-  applyVideoSpeed
+  applyVideoSpeed,
+  clearMediaProbeCache,
+  getVideoEncoderLabel
 } from './ffmpeg-utils'
 import { burnSubtitles, transcribeLocalWhisper, transcribeOpenAI } from './transcribe'
 import { writeSubtitleExports } from './subtitles-export'
@@ -110,7 +113,8 @@ async function cutToSegments(
   segments: SpeechSegment[],
   outputPath: string,
   workDir: string,
-  ext: string
+  ext: string,
+  onPartProgress?: (done: number, total: number) => void
 ): Promise<void> {
   if (segments.length === 0) {
     if (isMp4(ext)) await encodeQuickTimeMp4(inputPath, outputPath)
@@ -118,11 +122,13 @@ async function cutToSegments(
     return
   }
 
-  const partPaths: string[] = []
-  for (let i = 0; i < segments.length; i++) {
+  const partPaths: string[] = segments.map((_, i) => join(workDir, `part_${i}${ext}`))
+  const concurrency = Math.min(3, segments.length)
+  let completed = 0
+
+  async function encodePart(i: number): Promise<void> {
     const { start, end } = segments[i]
-    const part = join(workDir, `part_${i}${ext}`)
-    partPaths.push(part)
+    const part = partPaths[i]
     if (isMp4(ext)) {
       await trimToQuickTimeMp4(inputPath, start, end, part)
     } else {
@@ -139,7 +145,20 @@ async function cutToSegments(
         part
       ])
     }
+    completed += 1
+    onPartProgress?.(completed, segments.length)
   }
+
+  let nextIndex = 0
+  async function worker(): Promise<void> {
+    while (nextIndex < segments.length) {
+      const i = nextIndex
+      nextIndex += 1
+      await encodePart(i)
+    }
+  }
+  await Promise.all(Array.from({ length: concurrency }, () => worker()))
+
   const listPath = join(workDir, 'concat.txt')
   const listBody = partPaths.map((p) => `file '${p.replace(/'/g, "'\\''")}'`).join('\n')
   await writeFile(listPath, listBody)
@@ -186,58 +205,70 @@ export async function processRecording(
   const workDir = join(dir, `.loom-agent-${stem}`)
   if (!existsSync(workDir)) await mkdir(workDir, { recursive: true })
 
-  onProgress('Preparing clip…', 5)
+  clearMediaProbeCache()
+  const encoder = await getVideoEncoderLabel()
+  onProgress(`Preparing clip (${encoder})…`, 5)
   const fullDuration = await probeDuration(inputPath)
   const trimEnd = options.trimEndSec ?? fullDuration
   const trimStart = Math.max(0, Math.min(options.trimStartSec, fullDuration))
   const trimEndClamped = Math.max(trimStart + 0.1, Math.min(trimEnd, fullDuration))
 
+  const editedPath = join(dir, `${stem}-edited${ext}`)
   const trimmedPath = join(workDir, `trimmed${ext}`)
   const needsTrim = trimStart > 0.05 || trimEndClamped < fullDuration - 0.05
-  const workingInput = needsTrim ? trimmedPath : inputPath
-  if (needsTrim) {
-    onProgress('Applying manual trim…', 12)
-    await trimVideo(inputPath, trimStart, trimEndClamped, trimmedPath, ext)
-  }
+  const wantsSpeed = Math.abs(options.videoSpeed - 1) >= 0.02
+  const onePassTrimSpeed =
+    isMp4(ext) && needsTrim && !options.cutSilence && wantsSpeed
 
-  let speech: SpeechSegment[] = [{ start: 0, end: await probeDuration(workingInput) }]
-  if (options.cutSilence) {
-    onProgress('Detecting silent sections…', 22)
-    const { silences, duration } = await detectSilences(
-      workingInput,
-      options.silenceThresholdDb,
-      options.minSilenceSec
+  let speech: SpeechSegment[] = []
+
+  if (onePassTrimSpeed) {
+    onProgress('Trim + speed (single encode)…', 18)
+    await trimAndSpeedToQuickTimeMp4(
+      inputPath,
+      trimStart,
+      trimEndClamped,
+      editedPath,
+      options.videoSpeed
     )
-    speech =
-      silences.length === 0 && duration > 0
-        ? [{ start: 0, end: duration }]
-        : silencesToSpeechSegments(silences, duration, options.paddingSec)
-    onProgress(`Cutting ${speech.length} speech segment(s)…`, 40)
+    speech = [{ start: 0, end: await probeDuration(editedPath) }]
+    onProgress('Skipping silence removal…', 38)
   } else {
-    onProgress('Skipping silence removal…', 35)
-  }
+    let sourceForEdit = inputPath
+    if (needsTrim) {
+      onProgress('Applying trim…', 12)
+      await trimVideo(inputPath, trimStart, trimEndClamped, trimmedPath, ext)
+      sourceForEdit = trimmedPath
+    }
 
-  const editedPath = join(dir, `${stem}-edited${ext}`)
-  if (options.cutSilence) {
-    await cutToSegments(workingInput, speech, editedPath, workDir, ext)
-  } else if (needsTrim) {
-    await copyFile(workingInput, editedPath)
-  } else {
-    await copyFile(inputPath, editedPath)
-  }
+    speech = [{ start: 0, end: await probeDuration(sourceForEdit) }]
+    if (options.cutSilence) {
+      onProgress('Detecting silent sections…', 22)
+      const { silences, duration } = await detectSilences(
+        sourceForEdit,
+        options.silenceThresholdDb,
+        options.minSilenceSec
+      )
+      speech =
+        silences.length === 0 && duration > 0
+          ? [{ start: 0, end: duration }]
+          : silencesToSpeechSegments(silences, duration, options.paddingSec)
+      onProgress(`Re-encoding ${speech.length} segment(s) (parallel)…`, 32)
+      await cutToSegments(sourceForEdit, speech, editedPath, workDir, ext, (done, total) => {
+        onProgress(`Segment ${done}/${total}…`, 32 + Math.round((done / total) * 18))
+      })
+      onProgress('Joining segments…', 52)
+    } else {
+      onProgress('Skipping silence removal…', 35)
+      await copyFile(sourceForEdit, editedPath)
+    }
 
-  if (isMp4(ext) && !options.cutSilence && !needsTrim) {
-    onProgress('Optimizing for QuickTime…', 48)
-    const tmp = `${editedPath}.qt.part`
-    await encodeQuickTimeMp4(editedPath, tmp)
-    await rename(tmp, editedPath)
-  }
-
-  if (isMp4(ext) && Math.abs(options.videoSpeed - 1) >= 0.02) {
-    onProgress(`Applying ${options.videoSpeed}× speed…`, 52)
-    const speedOut = join(workDir, `speed${ext}`)
-    await applyVideoSpeed(editedPath, speedOut, options.videoSpeed)
-    await copyFile(speedOut, editedPath)
+    if (isMp4(ext) && wantsSpeed) {
+      onProgress(`Applying ${options.videoSpeed}× speed…`, 55)
+      const speedOut = join(workDir, `speed${ext}`)
+      await applyVideoSpeed(editedPath, speedOut, options.videoSpeed)
+      await copyFile(speedOut, editedPath)
+    }
   }
 
   let finalSrt: string | null = null
@@ -247,7 +278,10 @@ export async function processRecording(
   let transcriptionSource: ProcessResult['transcriptionSource'] = 'none'
 
   if (options.transcription === 'local') {
-    onProgress('Generating subtitles (local Whisper)…', 62)
+    onProgress(
+      `Generating subtitles (local Whisper, ${options.whisperModel} — often the slowest step)…`,
+      62
+    )
     const { srtPath, available, error } = await transcribeLocalWhisper(
       editedPath,
       workDir,

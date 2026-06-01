@@ -20,6 +20,7 @@ export default function App() {
   const [result, setResult] = useState<ProcessResult | null>(null)
   const [exportNotice, setExportNotice] = useState<string | null>(null)
   const [processError, setProcessError] = useState<string | null>(null)
+  const [reviewEntry, setReviewEntry] = useState<'record' | 'import'>('record')
 
   const selected = sources.find((s) => s.id === selectedId) ?? null
 
@@ -77,10 +78,32 @@ export default function App() {
       if (save.canceled) return
       setSavedPath(save.filePath)
       setExportNotice(save.filePath)
+      setReviewEntry('record')
       setPhase('review')
     } catch (e) {
       setProcessLog(e instanceof Error ? e.message : String(e))
     }
+  }
+
+  const handleOpenExistingVideo = async () => {
+    const picked = await window.loomAgent.pickVideoFile()
+    if (picked.canceled) return
+    stopStreams()
+    setSavedPath(picked.filePath)
+    setReviewEntry('import')
+    setExportNotice(null)
+    setProcessError(null)
+    setResult(null)
+    setPhase('review')
+  }
+
+  const handleReviewBack = () => {
+    if (reviewEntry === 'import') {
+      setSavedPath(null)
+      setPhase('setup')
+      return
+    }
+    setPhase('preview')
   }
 
   const runProcess = async (options: ProcessOptions) => {
@@ -115,6 +138,7 @@ export default function App() {
     setProcessPercent(null)
     setExportNotice(null)
     setProcessError(null)
+    setReviewEntry('record')
   }
 
   const screens = sources.filter((s) => s.type === 'screen')
@@ -181,9 +205,14 @@ export default function App() {
             </label>
 
             {phase === 'setup' && (
-              <button type="button" className="btn primary" disabled={!selected} onClick={handleStartPreview}>
-                Start preview
-              </button>
+              <div className="setup-actions">
+                <button type="button" className="btn primary" disabled={!selected} onClick={handleStartPreview}>
+                  Start preview
+                </button>
+                <button type="button" className="btn secondary" onClick={() => void handleOpenExistingVideo()}>
+                  Open existing video…
+                </button>
+              </div>
             )}
 
             <SettingsPanel />
@@ -213,9 +242,10 @@ export default function App() {
               )}
               <ReviewPanel
                 filePath={savedPath}
-                onBack={() => setPhase('preview')}
+                onBack={handleReviewBack}
                 onProcess={runProcess}
                 processError={processError}
+                imported={reviewEntry === 'import'}
               />
             </>
           ) : (
@@ -250,7 +280,15 @@ export default function App() {
           {(phase === 'processing' || phase === 'done') && (
             <div className={`process-box ${phase === 'done' && result ? 'process-box--success' : ''}`}>
               <h3>{phase === 'processing' ? 'Processing' : result ? 'Export complete' : 'Finished'}</h3>
-              {phase === 'processing' && <p>{processLog}</p>}
+              {phase === 'processing' && (
+            <>
+              <p>{processLog}</p>
+              <p className="muted process-hint">
+                Long clips + silence cut + local Whisper can take several minutes. The progress line above
+                shows the current step.
+              </p>
+            </>
+          )}
               {processPercent != null && phase === 'processing' && (
                 <div className="progress">
                   <div className="progress-fill" style={{ width: `${processPercent}%` }} />

@@ -57,7 +57,9 @@ npm run build
 npm run preview   # run packaged output locally (electron-vite preview)
 ```
 
-### 2. Record
+### 2. Record — or open an existing file
+
+**New recording**
 
 1. **Capture source** — choose a **display** or **window**; click **Refresh list** if needed.
 2. **Audio** — enable **microphone** and/or **system audio** (full display often works best for system audio on macOS).
@@ -65,7 +67,9 @@ npm run preview   # run packaged output locally (electron-vite preview)
 4. Drag the **square webcam** to position it on the canvas.
 5. **Start recording** → **Stop recording** → choose where to save the **MP4**.
 
-You land on **Review, cut & trim** with a preview of the saved file.
+**Already have a video?**
+
+On the home screen, click **Open existing video…** (defaults to **~/Movies/Loom Agent/**). Pick an **MP4**, **MOV**, or **WebM** file. You go straight to **Review, cut & trim** — same trim, silence cut, subtitles, and export as after a new recording. Processed files (`*-edited.mp4`, subtitles, etc.) are written **next to the file you opened**.
 
 ### 3. Review and trim
 
@@ -187,6 +191,8 @@ Include:
 
 | Symptom | Things to try |
 |---------|----------------|
+| **Processing feels slow** | Normal for 1080p re-encode + Whisper. On Mac the app uses **VideoToolbox** when available. Turn off **Also remove silent sections** if you only need trim. Use Whisper **tiny** or **OpenAI API** instead of local **base/small**. Disable **burn-in** unless you need it (extra full encode). |
+| **Soft or blocky video** | Quality was raised (14 Mbps capture, higher export bitrate / CRF 18). **Re-record** after updating — old files cannot regain detail. Avoid extra processing passes you do not need. |
 | Black preview in review | Restart after `npm run dev`; open file in Finder; processing still works |
 | No system audio | Record full **display**; check macOS screen recording permission |
 | Whisper not found | Settings → **Check Whisper**; set `WHISPER_PYTHON` in `.env` |
